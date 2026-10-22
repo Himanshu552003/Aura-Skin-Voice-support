@@ -1,0 +1,28 @@
+# Secrets - NEVER commit real API keys
+.env
+
+# Personal notes - not for GitHub
+MY_GUIDE.md
+
+# The assignment brief is marked "Confidential"
+*.pdf
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Gradio's local cache / temp files
+.gradio/
+flagged/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
