@@ -2,7 +2,7 @@
 
 **Live Application:** _coming soon (Hugging Face Spaces link)_
 
-> **Build status:** Step 1 of 7 done (mock data, policy engine, tools). Sections marked _(in progress)_ describe parts that are not built yet.
+> **Build status:** Step 2 of 7 done (mock data, policy engine, tools, real-time voice loop). Sections marked _(in progress)_ describe parts that are not built yet.
 
 ---
 
@@ -22,7 +22,7 @@ The table maps each part of the build to the assignment's Core Requirements (Sec
 
 | Requirement | How it is met | Status |
 |---|---|---|
-| **A. Voice Conversation** | Real-time mic audio via FastRTC, Groq Whisper STT, Groq LLM, Sarvam Bulbul v3 TTS (Indian voice). Persona "Aria": friendly, professional, concise. Conversation history kept for the whole call. | _(in progress)_ |
+| **A. Voice Conversation** | Real-time mic audio via FastRTC, Groq Whisper STT, Groq LLM, Sarvam Bulbul v3 streaming TTS (Indian voice). Persona "Aria": friendly, professional, concise. Conversation history kept for the whole call. Instant pre-recorded greeting. Unclear or mumbled audio gets "Sorry, I didn't quite catch that" instead of a guessed answer. | ✅ |
 | **B. Brand Knowledge & Guardrails** | All policy numbers live in `policies.py`. Return, damage and cancellation decisions are made in code. Out-of-scope requests are politely declined. Invalid or missing order IDs return structured errors, so the agent asks the customer to verify the ID instead of guessing. | Policy engine ✅ / prompt _(in progress)_ |
 | **C. Tool Calling** | `get_order_details`, `check_return_eligibility`, `cancel_order`. Order IDs heard by STT ("ord 101", "order one zero one") are normalised to `ORD-101`. | ✅ |
 | **D. Post-Call Summary** | Chronological transcript, plus a JSON outcome (`customer_intent`, `order_id`, `resolution_status`, `call_summary`) from a separate LLM call over the transcript. | _(in progress)_ |
@@ -46,6 +46,16 @@ flowchart LR
     D -->|reply text| G[Sarvam Bulbul v3<br/>text-to-speech]
     G -->|audio| H[Browser speaker]
 ```
+
+### One conversational turn
+
+1. **FastRTC** streams the microphone over WebRTC. Its `ReplyOnPause` handler runs Silero VAD and fires once the customer stops speaking.
+2. **`stt.py`** resamples the speech from 48 kHz to 16 kHz (a 3x smaller upload) and sends it to Groq Whisper. The request includes a spelling hint ("Aria", "Aura Skincare", "ORD-101") so brand words and order IDs come back correctly. Segments Whisper marks as likely silence (`no_speech_prob`) or low confidence (`avg_logprob`) are dropped, so noise and mumbling lead to "could you repeat that?" instead of a hallucinated answer.
+3. **`agent.py`** keeps the call's message history and asks the Groq LLM for a reply. Low reasoning effort keeps replies fast.
+4. **`tts.py`** calls Sarvam's **streaming** TTS endpoint for raw 24 kHz PCM. Audio is forwarded to the browser in 0.2 s pieces as it arrives, so Aria starts speaking before the whole sentence is synthesised.
+5. Each browser call has its own `CallSession`, keyed by FastRTC's `webrtc_id`. It holds that call's history, transcript and order database.
+
+**Measured latency** (end of customer speech → first audio from Aria, on a warm connection): **~0.65–0.9 s** (STT ~0.3 s, LLM ~0.2–0.35 s, TTS first audio ~0.2 s). The first turn of a session is slower (~1.5–2.5 s) while connections are opened.
 
 ### How the agent decides when to use a tool
 
@@ -74,12 +84,12 @@ _(in progress: completed in Step 3)_ The LLM gets JSON schemas for each tool (`T
 | Language | Python 3.11 | One language for the whole app |
 | Real-time audio | FastRTC | WebRTC streaming with built-in voice activity detection, integrates directly with Gradio |
 | UI | Gradio | Python-only UI, deploys natively on Hugging Face Spaces |
-| Speech-to-text | Groq Whisper | Very fast hosted Whisper inference, keeps turn latency low |
-| LLM | Groq-hosted model with tool calling | Low time-to-first-token, OpenAI-compatible tool calling |
-| Text-to-speech | Sarvam Bulbul v3 | Natural Indian voices, built for Indian English and Hinglish |
+| Speech-to-text | Groq `whisper-large-v3-turbo` | Fastest hosted Whisper: ~0.3 s per turn in testing |
+| LLM | Groq `openai/gpt-oss-120b` (`reasoning_effort="low"`) | Supports tool calling, ~0.2–0.35 s per reply in testing. Groq's Llama 3.x models were retired in 2026. |
+| Text-to-speech | Sarvam `bulbul:v3`, voice `priya`, `en-IN` | Natural Indian voice; the streaming endpoint gives first audio in ~0.2–0.6 s |
 | Hosting | Hugging Face Spaces | Free, public, first-class Gradio support |
 
-_(Exact model names are confirmed against provider docs in Step 2.)_
+All models can be changed in `.env` without code changes (`LLM_MODEL`, `STT_MODEL`, `TTS_SPEAKER`).
 
 ---
 
@@ -96,9 +106,10 @@ python -m venv venv
 pip install -r requirements.txt
 cp .env.example .env        # then add your API keys
 python test_tools.py        # tests tools & policies, no API keys needed
+python app.py               # starts the app at http://127.0.0.1:7860
 ```
 
-_(The command to run the voice app is added in Step 2.)_
+Open http://127.0.0.1:7860 in Chrome or Edge, click **Start Call** and allow microphone access. Headphones give the best experience.
 
 ## Environment Variables
 
@@ -109,6 +120,7 @@ See [`.env.example`](.env.example).
 | `GROQ_API_KEY` | Whisper STT and LLM |
 | `SARVAM_API_KEY` | Bulbul TTS |
 | `HF_TOKEN` | TURN server for WebRTC when deployed on Spaces |
+| `LLM_MODEL`, `STT_MODEL`, `TTS_SPEAKER` | Optional overrides (defaults: `openai/gpt-oss-120b`, `whisper-large-v3-turbo`, `priya`) |
 
 ## Deployment
 
@@ -154,7 +166,7 @@ I chose a modular STT → LLM → TTS pipeline over a speech-to-speech model bec
 _(to be filled in after building: likely candidates are latency tuning or reliable tool calling from noisy speech input)_
 
 **3. If you had one more week, what would you improve first and why?**
-_(draft)_ Streaming TTS sentence by sentence, so Aria starts speaking before the full reply is ready, plus barge-in so customers can interrupt. These two changes have the biggest effect on how natural a call feels.
+_(draft)_ Stream LLM tokens straight into TTS sentence by sentence, so Aria starts speaking before the full reply is written. TTS audio already streams, but the reply text is still generated in full first. I would also tune interruption (barge-in) handling for laptop speakers without headphones. These two changes have the biggest effect on how natural a call feels.
 
 **4. What would need to change at 1,000 conversations a day?**
 _(draft)_
@@ -169,4 +181,4 @@ _(draft)_
 
 ## Author
 
-**Himanshu Yadav**, [LinkedIn](https://www.linkedin.com/in/your-profile)
+**Himanshu Yadav**, [LinkedIn](https://www.linkedin.com/in/himanshu-yadav552003/)
