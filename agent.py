@@ -12,6 +12,7 @@ The LLM only explains; the Python tools make every policy decision.
 
 import json
 import logging
+import time
 
 from groq import Groq, RateLimitError
 
@@ -31,6 +32,27 @@ DIDNT_CATCH = "Sorry, I didn't quite catch that. Could you please say it again?"
 TECH_TROUBLE = "Sorry, I'm having a little technical trouble. Could you please repeat that?"
 
 MAX_TOOL_ROUNDS = 3  # safety limit: stop if the LLM keeps calling tools in a loop
+
+
+def ask_llm(**request):
+    """
+    Send one request to the Groq LLM. Used for the conversation and for the summary.
+    If the main model has hit Groq's rate limit, the backup model is used instead.
+    """
+    models = [config.LLM_MODEL, config.LLM_FALLBACK_MODEL]
+    for model in models:
+        try:
+            return client.chat.completions.create(
+                model=model,
+                reasoning_effort="low",  # think briefly: faster replies
+                temperature=0.2,
+                **request,
+            )
+        except RateLimitError:
+            if model == models[-1]:
+                raise  # every model is over its limit
+            log.warning("%s hit its rate limit, using backup model %s",
+                        model, config.LLM_FALLBACK_MODEL)
 
 SYSTEM_PROMPT = """You are Aria, a customer support specialist at Aura Skincare.
 You are on a live VOICE call with a customer.
@@ -75,37 +97,34 @@ class CallSession:
             now=now_ist().strftime("%A, %d %B %Y, %I:%M %p"),
         )
         self.messages = [{"role": "system", "content": prompt}]  # what the LLM sees
-        self.transcript = []  # what the customer and Aria said, in order (for the UI)
-        self.tool_log = []    # every tool Aria used, with its result (for logs/summary)
-        self.db = OrderDatabase()  # this call's own copy of the orders
+        self.transcript = []        # what the customer and Aria said (for the live chat box)
+        self.timed_transcript = []  # the same lines with the time (for the post-call transcript)
+        self.tool_log = []          # every tool Aria used, with its result (for the summary)
+        self.db = OrderDatabase()   # this call's own copy of the orders
+        self.started_at = time.time()
 
     def add_agent_line(self, text: str) -> None:
         self.messages.append({"role": "assistant", "content": text})
-        self.transcript.append({"role": "assistant", "content": text})
+        self._add_to_transcript("assistant", text)
 
     def add_customer_line(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
-        self.transcript.append({"role": "user", "content": text})
+        self._add_to_transcript("user", text)
+
+    def _add_to_transcript(self, role: str, text: str) -> None:
+        self.transcript.append({"role": role, "content": text})
+        self.timed_transcript.append({"time": now_ist().strftime("%I:%M:%S %p"),
+                                      "speaker": "Aria" if role == "assistant" else "Customer",
+                                      "text": text})
 
     def _ask_llm(self):
         """One request to the LLM, with the tools it may use."""
-        models = [config.LLM_MODEL, config.LLM_FALLBACK_MODEL]
-        for model in models:
-            try:
-                return client.chat.completions.create(
-                    model=model,
-                    messages=self.messages,
-                    tools=TOOL_SCHEMAS,
-                    tool_choice="auto",          # the LLM decides if a tool is needed
-                    reasoning_effort="low",      # think briefly: faster replies
-                    max_completion_tokens=500,
-                    temperature=0.2,
-                )
-            except RateLimitError:
-                if model == models[-1]:
-                    raise  # every model is over its limit
-                log.warning("%s hit its rate limit, using backup model %s",
-                            model, config.LLM_FALLBACK_MODEL)
+        return ask_llm(
+            messages=self.messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",          # the LLM decides if a tool is needed
+            max_completion_tokens=500,
+        )
 
     def reply(self) -> str:
         """Get Aria's answer to the conversation so far (running tools if needed)."""

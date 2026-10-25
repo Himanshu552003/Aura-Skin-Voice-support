@@ -1,8 +1,19 @@
+---
+title: Aria - Aura Skincare Voice Support
+emoji: 🌿
+colorFrom: green
+colorTo: yellow
+sdk: gradio
+sdk_version: 5.50.0
+python_version: "3.11"
+app_file: app.py
+pinned: false
+short_description: AI voice customer support agent for a skincare brand
+---
+
 # Aria: AI Voice Customer Support Agent for Aura Skincare
 
 **Live Application:** _coming soon (Hugging Face Spaces link)_
-
-> **Build status:** Step 3 of 7 done (policy engine, tools, real-time voice loop, brand knowledge and tool calling). Sections marked _(in progress)_ describe parts that are not built yet.
 
 ---
 
@@ -25,8 +36,8 @@ The table maps each part of the build to the assignment's Core Requirements (Sec
 | **A. Voice Conversation** | Real-time mic audio via FastRTC, Groq Whisper STT, Groq LLM, Sarvam Bulbul v3 streaming TTS (Indian voice). Persona "Aria": friendly, professional, concise. Conversation history kept for the whole call. Instant pre-recorded greeting. Unclear or mumbled audio gets "Sorry, I didn't quite catch that" instead of a guessed answer. | ✅ |
 | **B. Brand Knowledge & Guardrails** | Aria's prompt is generated from the same constants the policy code uses, so they can't drift apart. Return, damage, cancellation, COD and shipping decisions are made in Python. She refuses exceptions even when the customer insists, declines out-of-scope requests ("book a flight to Goa"), and says "I don't have that information" for anything not in the brief (product claims, refund timelines, offers). | ✅ |
 | **C. Tool Calling** | Five tools: `get_order_details`, `check_return_eligibility`, `cancel_order`, plus `check_return_policy` (no order ID, e.g. the brief's "20 days ago, opened" example) and `check_cod_and_shipping` (any amount). Spoken order IDs ("ord 101", "order one zero one") are normalised to `ORD-101`. Cancellation is two-step and confirmation is enforced in code. | ✅ |
-| **D. Post-Call Summary** | Chronological transcript, plus a JSON outcome (`customer_intent`, `order_id`, `resolution_status`, `call_summary`) from a separate LLM call over the transcript. | _(in progress)_ |
-| **E. Testing Interface** | Start / End Call buttons, live Listening / Thinking / Speaking indicator, Test Orders panel, transcript and summary view. | _(in progress)_ |
+| **D. Post-Call Summary** | On End Call the page shows a timestamped, chronological transcript (customer + agent) and a JSON outcome. A **separate LLM call** over the transcript (JSON mode) fills `customer_intent`, `order_id`, `resolution_status` and `call_summary`. Values are validated against allowed lists. Code adds facts it already knows: `actions_taken` (each tool and its decision), `call_duration_seconds`, `customer_turns`. | ✅ |
+| **E. Testing Interface** | Start / End Call buttons. Live status badge: **Listening / Thinking / Speaking**, synced to actual audio playback. **Test Orders panel** (ORD-101/102/103 with live relative dates and example phrases). Live conversation view during the call, transcript and summary after it. | ✅ |
 
 **Mock data stays current.** Order dates are computed from the current time (IST) each time a call starts. ORD-102 is always "delivered 14 days ago" and ORD-103 is always "ordered 3 hours ago". ORD-101 is "expected by 6 PM today", which rolls over to 6 PM tomorrow when tested after 6 PM IST, so the promise is never in the past.
 
@@ -55,7 +66,38 @@ flowchart LR
 4. **`tts.py`** calls Sarvam's **streaming** TTS endpoint for raw 24 kHz PCM. Audio is forwarded to the browser in 0.2 s pieces as it arrives, so Aria starts speaking before the whole sentence is synthesised.
 5. Each browser call has its own `CallSession`, keyed by FastRTC's `webrtc_id`. It holds that call's history, transcript and order database.
 
-**Measured latency** (end of customer speech → first audio from Aria, on a warm connection): **~0.65–0.9 s** (STT ~0.3 s, LLM ~0.2–0.35 s, TTS first audio ~0.2 s). The first turn of a session is slower (~1.5–2.5 s) while connections are opened.
+**Measured latency** (end of customer speech → first audio from Aria, on a warm connection):
+
+| Turn type | Total | Breakdown |
+|---|---|---|
+| Without a tool | **~0.65–0.9 s** | STT ~0.3 s, LLM ~0.2–0.35 s, TTS first audio ~0.2 s |
+| With a tool | **~1.4–1.8 s** | Two LLM rounds |
+
+The first turn of a session is slower while connections are opened.
+
+### Live state indicator and post-call summary
+
+- `respond()` sends the page the live transcript and the current state through FastRTC's `AdditionalOutputs`:
+  - **Thinking** as soon as the customer pauses
+  - **Speaking** when the reply audio starts
+  - **Listening** once the reply has finished
+- FastRTC queues audio faster than it plays, so `play_and_wait()` holds the reply open until the audio has actually finished playing. It waits in 0.1 s steps, so barge-in still interrupts immediately.
+- End Call fires FastRTC's `stop_recording` event. `summary.py` then runs a separate LLM call over the transcript and tool log and returns the JSON outcome. The call's session is then freed.
+
+### Project structure
+
+| File | Role |
+|---|---|
+| `app.py` | Gradio + FastRTC app: call handling, live updates, end-of-call flow |
+| `stt.py` / `tts.py` | Groq Whisper speech-to-text / Sarvam Bulbul streaming text-to-speech |
+| `agent.py` | `CallSession`: system prompt, conversation memory, tool-calling loop, model fallback |
+| `tools.py` | The 5 tools, their JSON schemas, order ID normalisation, safe dispatcher |
+| `policies.py` | Brand policy constants, decision functions, `BRAND_INFO` for the prompt |
+| `orders.py` | Mock order database with dates relative to now; one copy per call |
+| `summary.py` | Post-call JSON summary (separate LLM call + code-derived facts) |
+| `ui.py` | Status badge, Test Orders panel, transcript formatting |
+| `config.py` | Settings and API keys from environment variables |
+| `test_tools.py` / `test_agent.py` | 47 rule/tool checks / 12 scripted LLM conversations |
 
 ### How the agent decides when to use a tool
 
@@ -167,9 +209,20 @@ See [`.env.example`](.env.example).
 | `HF_TOKEN` | TURN server for WebRTC when deployed on Spaces |
 | `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `STT_MODEL`, `TTS_SPEAKER` | Optional overrides (defaults: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `whisper-large-v3-turbo`, `priya`) |
 
-## Deployment
+## Deployment (Hugging Face Spaces)
 
-_(in progress: Step 6, Hugging Face Spaces)_
+The repository is Space-ready: the YAML header at the top of this README configures the Space (Gradio 5.50.0, Python 3.11, `app.py`).
+
+1. Create a new Space (SDK: **Gradio**, hardware: free **CPU basic**).
+2. In **Settings → Variables and secrets**, add the secrets `GROQ_API_KEY`, `SARVAM_API_KEY` and `HF_TOKEN`.
+3. Push the code to the Space:
+   ```bash
+   git remote add space https://huggingface.co/spaces/<username>/<space-name>
+   git push --force space main
+   ```
+4. Wait for the build to finish (Logs tab), then open the App tab.
+
+**Why `HF_TOKEN`?** Browsers and the Space server sit behind different networks. WebRTC needs a TURN relay to connect them. On Spaces the app automatically requests fresh TURN credentials for every call from FastRTC's Cloudflare TURN service, authenticated with `HF_TOKEN`. Locally no TURN server is needed.
 
 ---
 
@@ -198,6 +251,23 @@ _(in progress: Step 6, Hugging Face Spaces)_
 | "I want to track my order." (no ID) | Asks for the order ID |
 | "Can you book me a flight to Goa?" | Politely says it only helps with Aura Skincare queries |
 | "Is COD available?" / "Is shipping free?" | Answers from brand policy |
+
+After **End Call**, the transcript and the JSON summary appear under "Post-Call Summary". Example (cancellation call):
+
+```json
+{
+  "customer_intent": "CANCELLATION",
+  "order_id": "ORD-103",
+  "resolution_status": "RESOLVED",
+  "call_summary": "The customer requested cancellation of order ORD-103, and the agent confirmed and cancelled it successfully.",
+  "actions_taken": [
+    {"tool": "cancel_order", "outcome": "AWAITING_CONFIRMATION", "order_id": "ORD-103"},
+    {"tool": "cancel_order", "outcome": "CANCELLED", "order_id": "ORD-103"}
+  ],
+  "call_duration_seconds": 17,
+  "customer_turns": 2
+}
+```
 
 **Without voice:**
 - `python test_tools.py` runs 47 checks on the tools and policy rules. No API keys needed.
