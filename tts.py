@@ -27,7 +27,17 @@ session.headers.update({"api-subscription-key": config.SARVAM_API_KEY})
 
 
 def clean_for_speech(text: str) -> str:
-    """Remove things that sound bad when read aloud, like markdown stars or emojis."""
+    """Make text sound natural when read aloud."""
+    # LLMs often write curly quotes and special dashes. Turn them into normal ones,
+    # otherwise "can’t" would lose its apostrophe below and be read as "cant".
+    for fancy, plain in {"’": "'", "‘": "'", "“": '"', "”": '"',
+                         "‑": "-", "–": "-", "—": ", ", "…": "..."}.items():
+        text = text.replace(fancy, plain)
+    # "ORD-101" -> "order 101" (the screen still shows ORD-101; only the voice changes)
+    text = re.sub(r"\bORD-?\s?(\d+)", r"order \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\border order\b", "order", text, flags=re.IGNORECASE)  # "order ORD-101"
+    text = re.sub(r"\bRs\.?\s?(\d[\d,]*)", r"\1 rupees", text)  # "Rs.699" -> "699 rupees"
+    # Remove markdown stars and emojis
     text = re.sub(r"[*_#`>]", "", text)
     text = re.sub(r"[^\w\s.,!?;:'\"()\-₹%/&+@]", "", text)  # drops emojis and odd symbols
     return re.sub(r"\s+", " ", text).strip()

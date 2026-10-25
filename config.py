@@ -19,6 +19,9 @@ STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
 
 # LLM (Groq). gpt-oss-120b supports tool calling and answered in ~0.3 s in our tests.
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+# Backup model, used automatically if the main one hits Groq's rate limit
+# (the free plan has a daily token limit per model, so each model has its own budget).
+LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "openai/gpt-oss-20b")
 
 # Text-to-speech (Sarvam Bulbul v3, Indian English voice).
 TTS_MODEL = "bulbul:v3"

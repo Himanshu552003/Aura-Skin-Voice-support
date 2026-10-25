@@ -89,6 +89,8 @@ class OrderDatabase:
 
     def __init__(self, now: datetime | None = None):
         self.orders = build_orders(now)
+        # Orders the customer has been asked "shall I cancel it?" about (see tools.cancel_order)
+        self.awaiting_cancel_confirmation: set[str] = set()
 
     def get(self, order_id: str) -> dict | None:
         """Return the order, or None if it does not exist."""

@@ -12,8 +12,8 @@ from datetime import timedelta
 
 import policies
 from orders import CANCELLED, DELIVERED, PROCESSING, OrderDatabase, now_ist
-from tools import (cancel_order, check_return_eligibility, get_order_details,
-                   normalize_order_id, run_tool)
+from tools import (cancel_order, check_cod_and_shipping, check_return_eligibility,
+                   check_return_policy, get_order_details, normalize_order_id, run_tool)
 
 # Windows terminals sometimes cannot print symbols like ₹ or —. This fixes that.
 sys.stdout.reconfigure(encoding="utf-8")
@@ -94,8 +94,18 @@ r = cancel_order(db, "ORD-102")
 check("ORD-102 cancel refused (Delivered)",
       r["cancelled"] is False and r["decision"] == "ALREADY_DELIVERED", r)
 
+r = cancel_order(OrderDatabase(), "ORD-103", confirmed=True)
+check("ORD-103 'confirmed' on the FIRST call still asks first (code guard)",
+      r["cancelled"] is False and r.get("needs_confirmation") is True, r)
+
 r = cancel_order(db, "ORD-103")
-check("ORD-103 cancel succeeds (Processing)", r["cancelled"] is True, r)
+check("ORD-103 first call -> can be cancelled, asks for confirmation",
+      r["cancelled"] is False and r.get("needs_confirmation") is True, r)
+check("ORD-103 is still Processing until confirmed",
+      db.get("ORD-103")["status"] == PROCESSING)
+
+r = cancel_order(db, "ORD-103", confirmed=True)
+check("ORD-103 cancel succeeds after confirmation", r["cancelled"] is True, r)
 
 r = get_order_details(db, "ORD-103")
 check("ORD-103 now shows Cancelled", r["order"]["status"] == CANCELLED, r)
@@ -107,6 +117,36 @@ check("ORD-103 second cancel -> ALREADY_CANCELLED",
 fresh_db = OrderDatabase()
 check("A NEW call starts with ORD-103 back in Processing",
       fresh_db.get("ORD-103")["status"] == PROCESSING)
+
+
+print("\n=== check_return_policy (no order ID) ===")
+r = check_return_policy(db, days_since_delivery=20, product_opened=True)
+check("PDF example: 20 days + opened -> refused",
+      r["eligible"] is False and r["decision"] == "RETURN_WINDOW_CLOSED", r)
+
+r = check_return_policy(db, days_since_delivery=3, product_opened=False)
+check("3 days + unopened -> return OK", r["eligible"] is True, r)
+
+r = check_return_policy(db, days_since_delivery=1, is_damaged=True)
+check("Damaged, 1 day -> replacement OK", r["decision"] == "REPLACEMENT_ELIGIBLE", r)
+
+r = check_return_policy(db)
+check("No days given -> MISSING_DAYS", r.get("error") == "MISSING_DAYS", r)
+
+
+print("\n=== check_cod_and_shipping ===")
+r = check_cod_and_shipping(db, 3000)
+check("Rs.3,000 -> no COD, free shipping",
+      r["cash_on_delivery_allowed"] is False and r["shipping_fee"] == "Free", r)
+
+r = check_cod_and_shipping(db, "2,500")
+check("'2,500' (text with comma) -> COD allowed", r["cash_on_delivery_allowed"] is True, r)
+
+r = check_cod_and_shipping(db, 300)
+check("Rs.300 -> Rs.50 shipping", r["shipping_fee"] == "Rs.50", r)
+
+r = check_cod_and_shipping(db, "lots")
+check("Not a number -> MISSING_AMOUNT", r.get("error") == "MISSING_AMOUNT", r)
 
 
 print("\n=== run_tool (how the LLM calls tools) ===")

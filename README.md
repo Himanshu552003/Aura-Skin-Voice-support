@@ -2,7 +2,7 @@
 
 **Live Application:** _coming soon (Hugging Face Spaces link)_
 
-> **Build status:** Step 2 of 7 done (mock data, policy engine, tools, real-time voice loop). Sections marked _(in progress)_ describe parts that are not built yet.
+> **Build status:** Step 3 of 7 done (policy engine, tools, real-time voice loop, brand knowledge and tool calling). Sections marked _(in progress)_ describe parts that are not built yet.
 
 ---
 
@@ -23,8 +23,8 @@ The table maps each part of the build to the assignment's Core Requirements (Sec
 | Requirement | How it is met | Status |
 |---|---|---|
 | **A. Voice Conversation** | Real-time mic audio via FastRTC, Groq Whisper STT, Groq LLM, Sarvam Bulbul v3 streaming TTS (Indian voice). Persona "Aria": friendly, professional, concise. Conversation history kept for the whole call. Instant pre-recorded greeting. Unclear or mumbled audio gets "Sorry, I didn't quite catch that" instead of a guessed answer. | ✅ |
-| **B. Brand Knowledge & Guardrails** | All policy numbers live in `policies.py`. Return, damage and cancellation decisions are made in code. Out-of-scope requests are politely declined. Invalid or missing order IDs return structured errors, so the agent asks the customer to verify the ID instead of guessing. | Policy engine ✅ / prompt _(in progress)_ |
-| **C. Tool Calling** | `get_order_details`, `check_return_eligibility`, `cancel_order`. Order IDs heard by STT ("ord 101", "order one zero one") are normalised to `ORD-101`. | ✅ |
+| **B. Brand Knowledge & Guardrails** | Aria's prompt is generated from the same constants the policy code uses, so they can't drift apart. Return, damage, cancellation, COD and shipping decisions are made in Python. She refuses exceptions even when the customer insists, declines out-of-scope requests ("book a flight to Goa"), and says "I don't have that information" for anything not in the brief (product claims, refund timelines, offers). | ✅ |
+| **C. Tool Calling** | Five tools: `get_order_details`, `check_return_eligibility`, `cancel_order`, plus `check_return_policy` (no order ID, e.g. the brief's "20 days ago, opened" example) and `check_cod_and_shipping` (any amount). Spoken order IDs ("ord 101", "order one zero one") are normalised to `ORD-101`. Cancellation is two-step and confirmation is enforced in code. | ✅ |
 | **D. Post-Call Summary** | Chronological transcript, plus a JSON outcome (`customer_intent`, `order_id`, `resolution_status`, `call_summary`) from a separate LLM call over the transcript. | _(in progress)_ |
 | **E. Testing Interface** | Start / End Call buttons, live Listening / Thinking / Speaking indicator, Test Orders panel, transcript and summary view. | _(in progress)_ |
 
@@ -59,7 +59,32 @@ flowchart LR
 
 ### How the agent decides when to use a tool
 
-_(in progress: completed in Step 3)_ The LLM gets JSON schemas for each tool (`TOOL_SCHEMAS` in `tools.py`). The tool descriptions say when each one applies, e.g. "use whenever the customer asks about a specific order". When the model returns a tool call, the app runs it, sends the result back to the model, and the model writes a short spoken reply.
+Every LLM request includes JSON schemas for the five tools (`TOOL_SCHEMAS` in `tools.py`) with `tool_choice="auto"`, so the model decides per turn. Two things guide that decision:
+
+- **Tool descriptions** say when each tool applies, e.g. "use whenever the customer asks about a specific order".
+- **A routing section in the system prompt** maps intents to tools: order status → `get_order_details`; return for an order → `check_return_eligibility`; return without an order ID → `check_return_policy`; a specific amount → `check_cod_and_shipping`; no order ID → ask for one, never guess.
+
+The loop in `agent.py` (`CallSession.reply`):
+
+```
+customer text → LLM ──(tool_calls?)── no ──→ spoken answer
+                  ↑         │ yes
+                  │         ↓
+                  └── tool results (JSON) ← run_tool() → policies.py
+```
+
+At most 3 tool rounds per turn. General brand questions ("Do you have COD?") are answered directly from the brand information in the prompt, without a tool call.
+
+| Customer says | Tool called | Decision (made in code) |
+|---|---|---|
+| "Where is ORD-101?" | `get_order_details` | Out for Delivery, BlueDart BD-982103, by 6 PM today |
+| "Return ORD-102" | `check_return_eligibility` | `RETURN_WINDOW_CLOSED` (14 days > 7) |
+| "ORD-102 arrived damaged" | `check_return_eligibility(is_damaged)` | `DAMAGE_REPORT_WINDOW_CLOSED` (> 48 h) |
+| "Bought 20 days ago, opened, can I return?" | `check_return_policy` | `RETURN_WINDOW_CLOSED` |
+| "Cancel ORD-103" → "Yes" | `cancel_order` → `cancel_order(confirmed)` | Asks to confirm, then `cancelled: true` |
+| "Cancel ORD-101" | `cancel_order` | `ALREADY_SHIPPED`; can refuse at doorstep |
+| "Check ORD-999" | `get_order_details` | `ORDER_NOT_FOUND`; asks the customer to verify |
+| "COD for 3,000 rupees?" | `check_cod_and_shipping` | COD not allowed (limit ₹2,500) |
 
 ### How guardrails are enforced
 
@@ -71,6 +96,19 @@ _(in progress: completed in Step 3)_ The LLM gets JSON schemas for each tool (`T
   - COD up to ₹2,500
 
   The tools return a decision code such as `RETURN_WINDOW_CLOSED` or `ALREADY_SHIPPED` with a reason. The LLM cannot override these decisions.
+- **Lesson learned: prompt rules alone were not enough.** During testing the LLM:
+  - cancelled an order when the customer only asked "*can* I cancel?"
+  - promised a return process after a refused delivery
+
+  Both were fixed in code:
+  - `cancel_order` never cancels on the first call. It records that confirmation was requested and only cancels on a second call with `confirmed=true`.
+  - Tool results carry a `note_for_agent` that limits what may be offered ("refusing at the doorstep is the ONLY option").
+- **Prompt and code share one source of truth.** `policies.BRAND_INFO` is built from the same constants the decision functions use.
+- **Scope and honesty rules** in the system prompt cover:
+  - Aura Skincare topics only.
+  - No product claims or skin advice (the brief has no product data).
+  - No invented next steps.
+  - Unclear speech → ask the customer to repeat.
 - **No invented data.** Fields the brief does not specify are left out of tool results, and unknown order IDs return `ORDER_NOT_FOUND`.
 - **Tools never crash.** Bad or unexpected LLM arguments, broken JSON and unknown tool names all return structured errors.
 - **Assumption:** the brief says free delivery "above ₹499" and a ₹50 fee "below ₹499", which leaves exactly ₹499 undefined. This build treats ₹499 as free.
@@ -90,6 +128,13 @@ _(in progress: completed in Step 3)_ The LLM gets JSON schemas for each tool (`T
 | Hosting | Hugging Face Spaces | Free, public, first-class Gradio support |
 
 All models can be changed in `.env` without code changes (`LLM_MODEL`, `STT_MODEL`, `TTS_SPEAKER`).
+
+**Rate limits.** Groq's free tier allows 200K tokens per day and 8K tokens per minute per model, and a tool-using turn costs about 2.6K tokens. Two things keep calls working through these limits:
+
+- If the main model is rate-limited, the agent automatically falls back to `openai/gpt-oss-20b` (`LLM_FALLBACK_MODEL`).
+- The SDK retries short per-minute limits.
+
+The fallback model follows guardrails less strictly, so the production fix is Groq's pay-as-you-go Dev tier.
 
 ---
 
@@ -120,7 +165,7 @@ See [`.env.example`](.env.example).
 | `GROQ_API_KEY` | Whisper STT and LLM |
 | `SARVAM_API_KEY` | Bulbul TTS |
 | `HF_TOKEN` | TURN server for WebRTC when deployed on Spaces |
-| `LLM_MODEL`, `STT_MODEL`, `TTS_SPEAKER` | Optional overrides (defaults: `openai/gpt-oss-120b`, `whisper-large-v3-turbo`, `priya`) |
+| `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `STT_MODEL`, `TTS_SPEAKER` | Optional overrides (defaults: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `whisper-large-v3-turbo`, `priya`) |
 
 ## Deployment
 
@@ -144,14 +189,19 @@ _(in progress: Step 6, Hugging Face Spaces)_
 |---|---|
 | "Where is my order ORD-101?" | Out for delivery with BlueDart, expected by 6 PM today |
 | "I want to return ORD-102." | Politely refused: delivered 14 days ago, outside the 7-day window |
-| "Please cancel ORD-103." | Cancelled (it is still Processing) |
+| "Please cancel ORD-103." → "Yes" | Asks to confirm, then cancels (it is still Processing) |
+| "I bought it 20 days ago and opened it. Can I return it?" | Politely refused (outside the 7-day window) |
+| "Please make an exception." | Still refused, no promises |
+| "Is your serum good for oily skin?" | "I don't have that information" (no invented product claims) |
 | "Cancel ORD-101." | Refused: already out for delivery, can refuse at doorstep |
 | "Check order ORD-999." | "I couldn't find that order, could you verify the ID?" |
 | "I want to track my order." (no ID) | Asks for the order ID |
 | "Can you book me a flight to Goa?" | Politely says it only helps with Aura Skincare queries |
 | "Is COD available?" / "Is shipping free?" | Answers from brand policy |
 
-**Without voice:** `python test_tools.py` runs 36 checks on the tools and policy rules.
+**Without voice:**
+- `python test_tools.py` runs 47 checks on the tools and policy rules. No API keys needed.
+- `python test_agent.py` runs 12 scripted conversations against the real LLM and prints every tool call and result. Use `python test_agent.py 9` to run a single conversation, or `--chat` to type freely.
 
 ---
 
@@ -163,7 +213,17 @@ _(in progress: Step 6, Hugging Face Spaces)_
 I chose a modular STT → LLM → TTS pipeline over a speech-to-speech model because each step is visible and testable. I can read the transcript, see exactly which tool was called, and enforce policies in normal Python code. Groq gives very low latency for both Whisper and the LLM, and Sarvam Bulbul gives a natural Indian voice. FastRTC + Gradio kept everything in Python and deploys to Hugging Face Spaces in a few steps.
 
 **2. What was the most difficult part of the assignment, and how did you solve it?**
-_(to be filled in after building: likely candidates are latency tuning or reliable tool calling from noisy speech input)_
+_(draft)_ Making the agent reliably follow the brand policy. Even with clear rules in the prompt, the LLM sometimes:
+- cancelled an order when the customer only asked whether they *could* cancel
+- promised a return process that doesn't exist
+- praised a product it knew nothing about
+
+I solved this by moving decisions out of the prompt and into code:
+- the policy functions decide every outcome
+- cancellation requires a confirmation step that the code enforces
+- tool results tell the model exactly which options it may offer
+
+I verified each fix with a scripted test conversation.
 
 **3. If you had one more week, what would you improve first and why?**
 _(draft)_ Stream LLM tokens straight into TTS sentence by sentence, so Aria starts speaking before the full reply is written. TTS audio already streams, but the reply text is still generated in full first. I would also tune interruption (barge-in) handling for laptop speakers without headphones. These two changes have the biggest effect on how natural a call feels.

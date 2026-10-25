@@ -4,8 +4,10 @@ tools.py - The tools (functions) the AI agent can call.
     get_order_details(order_id)         -> where is my order?
     check_return_eligibility(order_id)  -> can I return it?
     cancel_order(order_id)              -> please cancel it
+    check_return_policy(days_since_delivery)  -> "I bought it 20 days ago, can I return it?" (no order ID)
+    check_cod_and_shipping(order_value)       -> "Is COD / free delivery available for Rs.3,000?"
 
-Each tool:
+Each order tool:
   1. cleans up the order ID (speech-to-text may give "ord 101" or "order one zero one"),
   2. looks the order up in this call's OrderDatabase,
   3. asks policies.py for the decision,
@@ -21,7 +23,7 @@ import re
 from datetime import datetime, timedelta
 
 import policies
-from orders import CANCELLED, OrderDatabase, now_ist
+from orders import CANCELLED, DELIVERED, OrderDatabase, now_ist
 
 log = logging.getLogger(__name__)
 
@@ -146,20 +148,87 @@ def check_return_eligibility(db: OrderDatabase, order_id=None,
     return result
 
 
-def cancel_order(db: OrderDatabase, order_id=None) -> dict:
-    """Cancel an order, but ONLY if the policy allows it."""
+def cancel_order(db: OrderDatabase, order_id=None, confirmed: bool = False) -> dict:
+    """
+    Cancel an order, but ONLY if the policy allows it AND the customer confirmed.
+
+    Cancelling can't be undone, so this is a 2-step process enforced in code:
+      1st call -> never cancels. Says "can be cancelled, ask the customer to confirm".
+      2nd call with confirmed=True -> actually cancels.
+    Even if the LLM sends confirmed=True straight away, the code still asks first.
+    """
     order, error = _find_order(db, order_id)
     if error:
         return error
 
     decision = policies.cancellation_decision(order["status"])
+    order_id = order["order_id"]
+    if decision["allowed"] and not (confirmed and order_id in db.awaiting_cancel_confirmation):
+        db.awaiting_cancel_confirmation.add(order_id)
+        return {"found": True, "order_id": order_id, "product": order["product"],
+                "cancelled": False, "can_be_cancelled": True, "needs_confirmation": True,
+                "message": "This order CAN be cancelled but has NOT been cancelled yet. Ask "
+                           "the customer to confirm. If they say yes, call cancel_order "
+                           "again with confirmed=true."}
     if decision["allowed"]:
-        db.set_status(order["order_id"], CANCELLED)
+        db.awaiting_cancel_confirmation.discard(order_id)
+        db.set_status(order_id, CANCELLED)
         return {"found": True, "order_id": order["order_id"], "product": order["product"],
                 "cancelled": True, "new_status": CANCELLED,
                 "message": "The order has been cancelled successfully."}
     return {"found": True, "order_id": order["order_id"], "product": order["product"],
             "cancelled": False, "status": order["status"], **decision}
+
+
+# ---- 2 extra tools for questions WITHOUT an order ID -------------------------
+def check_return_policy(db: OrderDatabase, days_since_delivery=None,
+                        product_opened: bool | None = None,
+                        is_damaged: bool = False) -> dict:
+    """
+    Return check when the customer gives no order ID, only facts, e.g.
+    "I bought this 20 days ago and opened it. Can I return it?"
+    The same policy code decides, so the LLM never has to.
+    """
+    try:
+        days = float(days_since_delivery)
+    except (TypeError, ValueError):
+        return {"error": "MISSING_DAYS",
+                "message": "Ask the customer how many days ago the order was delivered, "
+                           "or ask for their order ID."}
+    if days < 0:
+        return {"error": "INVALID_DAYS", "message": "Days since delivery cannot be negative."}
+
+    now = now_ist()
+    decision = policies.return_decision(
+        status=DELIVERED,
+        delivered_at=now - timedelta(days=days),
+        now=now,
+        product_opened=product_opened,
+        is_damaged=is_damaged,
+    )
+    return {"days_since_delivery": days, **decision}
+
+
+def check_cod_and_shipping(db: OrderDatabase, order_value=None) -> dict:
+    """Shipping fee and Cash on Delivery check for any order amount (in rupees)."""
+    try:
+        value = float(str(order_value).replace(",", "").replace("₹", "").replace("Rs.", ""))
+    except (TypeError, ValueError):
+        return {"error": "MISSING_AMOUNT",
+                "message": "Ask the customer for the order amount in rupees."}
+    fee = policies.shipping_fee(value)
+    result = {
+        "order_value": f"Rs.{value:g}",
+        "shipping_fee": "Free" if fee == 0 else f"Rs.{fee}",
+        "cash_on_delivery_allowed": policies.cod_available(value),
+        "cod_limit": f"Rs.{policies.COD_LIMIT}",
+        "delivery_time": policies.DELIVERY_TIME,
+    }
+    if not result["cash_on_delivery_allowed"]:
+        result["note_for_agent"] = ("We have no information about other payment methods, "
+                                    "so do not name any. If asked, say you don't have that "
+                                    "information.")
+    return result
 
 
 # ---- Tool descriptions for the LLM ------------------------------------------
@@ -213,10 +282,65 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "cancel_order",
-            "description": "Cancel an order. Only call this after the customer clearly "
-                           "asks to cancel. The tool itself checks if cancellation is allowed.",
-            "parameters": {"type": "object", "properties": {"order_id": _ORDER_ID_PARAM},
-                           "required": ["order_id"]},
+            "description": "Cancel an order. Call it when the customer wants to cancel or "
+                           "asks if they can cancel. The tool checks the policy and, if "
+                           "allowed, asks you to get the customer's confirmation first. "
+                           "After the customer says yes, call it again with confirmed=true.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": _ORDER_ID_PARAM,
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "True only after the customer said yes to your "
+                                       "question about cancelling this order.",
+                    },
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_return_policy",
+            "description": "Check if a return or damage replacement is allowed when the "
+                           "customer has NOT given an order ID but has said how long ago "
+                           "the product was delivered.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_since_delivery": {
+                        "type": "number",
+                        "description": "How many days ago the product was delivered or bought.",
+                    },
+                    "product_opened": {
+                        "type": "boolean",
+                        "description": "True if opened or used, False if unopened. Leave out if unknown.",
+                    },
+                    "is_damaged": {
+                        "type": "boolean",
+                        "description": "True if the product arrived damaged or defective.",
+                    },
+                },
+                "required": ["days_since_delivery"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_cod_and_shipping",
+            "description": "Get the shipping fee and whether Cash on Delivery is allowed "
+                           "for a given order amount. Use whenever the customer mentions "
+                           "a specific amount.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_value": {"type": "number", "description": "Order amount in rupees."},
+                },
+                "required": ["order_value"],
+            },
         },
     },
 ]
@@ -225,6 +349,8 @@ TOOL_FUNCTIONS = {
     "get_order_details": get_order_details,
     "check_return_eligibility": check_return_eligibility,
     "cancel_order": cancel_order,
+    "check_return_policy": check_return_policy,
+    "check_cod_and_shipping": check_cod_and_shipping,
 }
 
 

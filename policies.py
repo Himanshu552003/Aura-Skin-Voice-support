@@ -23,6 +23,14 @@ COD_LIMIT = 2500              # Cash on Delivery for orders up to Rs.2,500
 # Note: the brief says "free above Rs.499" and "Rs.50 fee below Rs.499", which
 # leaves exactly Rs.499 undefined. We treat Rs.499 as free (it is not "below").
 
+# The brand facts Aria is allowed to talk about (Section 3 of the assignment).
+# Built from the numbers above, so the prompt and the code can never disagree.
+BRAND_INFO = f"""Brand: Aura Skincare is a premium organic Indian skincare brand focused on simple, effective skincare products made with thoughtfully selected ingredients.
+Shipping: Free delivery on orders of {FREE_SHIPPING_MIN} rupees or more. Orders below {FREE_SHIPPING_MIN} rupees have a {SHIPPING_FEE} rupee shipping fee. Standard delivery takes {DELIVERY_TIME}.
+Returns and refunds: Returns are accepted within {RETURN_WINDOW_DAYS} days of delivery for unopened, unused products in original packaging. Damaged or defective products must be reported within {DAMAGE_REPORT_HOURS} hours of delivery, with photos, for a replacement.
+Cancellation: Orders can be cancelled only while their status is Processing. Once an order is Shipped or Out for Delivery it cannot be cancelled, but the customer may refuse the delivery at the doorstep.
+Cash on Delivery: COD is available for orders up to {COD_LIMIT} rupees. Customers can pay by cash or UPI at the doorstep."""
+
 
 # ---- Shipping & COD ---------------------------------------------------------
 def shipping_fee(order_value: int) -> int:
@@ -46,7 +54,10 @@ def cancellation_decision(status: str) -> dict:
     if status in (SHIPPED, OUT_FOR_DELIVERY):
         return {"allowed": False, "decision": "ALREADY_SHIPPED",
                 "reason": f"The order is '{status}', so it can no longer be cancelled. "
-                          "The customer may refuse the delivery at the doorstep."}
+                          "The customer may refuse the delivery at the doorstep.",
+                "note_for_agent": "Refusing at the doorstep is the ONLY option to offer. The "
+                                  "policy says nothing about returns or refunds after refusing, "
+                                  "so do not promise any."}
     if status == DELIVERED:
         return {"allowed": False, "decision": "ALREADY_DELIVERED",
                 "reason": "The order is already delivered, so it cannot be cancelled. "
