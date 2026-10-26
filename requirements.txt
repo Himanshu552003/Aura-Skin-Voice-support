@@ -4,5 +4,10 @@ gradio==5.50.0         # web UI
 groq==1.7.0            # Whisper speech-to-text + LLM
 requests==2.34.2       # calls the Sarvam text-to-speech API
 python-dotenv==1.2.4   # loads API keys from .env
-numpy==2.4.6           # audio arrays
-scipy==1.17.1          # resampling microphone audio to 16 kHz
+
+# numpy/scipy: the newest versions need Python 3.11+, but Hugging Face Spaces may
+# build with Python 3.10. The "; python_version" part picks the right one automatically.
+numpy==2.4.6; python_version >= "3.11"   # audio arrays
+numpy==2.2.6; python_version < "3.11"
+scipy==1.17.1; python_version >= "3.11"  # resampling microphone audio to 16 kHz
+scipy==1.15.3; python_version < "3.11"
