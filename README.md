@@ -81,7 +81,8 @@ The first turn of a session is slower while connections are opened.
   - **Thinking** as soon as the customer pauses
   - **Speaking** when the reply audio starts
   - **Listening** once the reply has finished
-- FastRTC queues audio faster than it plays, so `play_and_wait()` holds the reply open until the audio has actually finished playing. It waits in 0.1 s steps, so barge-in still interrupts immediately.
+- FastRTC queues audio faster than it plays, so `play_and_wait()` holds the reply open until the audio has actually finished playing, plus a 0.4 s margin.
+- **Echo protection (barge-in disabled).** Without headphones, the microphone picks up Aria's own voice from the speakers. With interruptions enabled, that echo was detected as customer speech and repeatedly cut Aria off, so replies sounded broken. A WebRTC test with simulated speaker echo reproduced this. `ReplyOnPause(..., can_interrupt=False)` ignores the mic while Aria is speaking. Because `play_and_wait()` tracks real playback time, the mic is muted for exactly as long as she talks. Echo-robust barge-in is listed as a future improvement.
 - End Call fires FastRTC's `stop_recording` event. `summary.py` then runs a separate LLM call over the transcript and tool log and returns the JSON outcome. The call's session is then freed.
 
 ### Project structure
@@ -296,7 +297,7 @@ I solved this by moving decisions out of the prompt and into code:
 I verified each fix with a scripted test conversation.
 
 **3. If you had one more week, what would you improve first and why?**
-_(draft)_ Stream LLM tokens straight into TTS sentence by sentence, so Aria starts speaking before the full reply is written. TTS audio already streams, but the reply text is still generated in full first. I would also tune interruption (barge-in) handling for laptop speakers without headphones. These two changes have the biggest effect on how natural a call feels.
+_(draft)_ Stream LLM tokens straight into TTS sentence by sentence, so Aria starts speaking before the full reply is written. TTS audio already streams, but the reply text is still generated in full first. I would also bring back barge-in (interrupting Aria). It is currently disabled because, on laptop speakers, Aria's own voice leaked into the microphone and kept cutting her off. A proper fix would combine stronger echo cancellation with requiring real speech energy above the echo level before interrupting. These two changes have the biggest effect on how natural a call feels.
 
 **4. What would need to change at 1,000 conversations a day?**
 _(draft)_

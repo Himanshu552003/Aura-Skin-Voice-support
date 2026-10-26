@@ -56,14 +56,18 @@ def update_page(session: CallSession, state: str) -> AdditionalOutputs:
     return AdditionalOutputs(list(session.transcript), state)
 
 
+PLAYBACK_MARGIN = 0.4  # seconds: the browser plays audio slightly after we send it
+
+
 def play_and_wait(audio_pieces):
     """
     Send Aria's voice to the browser, then wait until it has finished PLAYING.
 
-    FastRTC queues audio faster than it plays, so without waiting, the status would
-    switch to "Listening" while Aria is still talking. We wait in small 0.1 s steps
-    (yielding None = "nothing to send"), so if the customer interrupts, FastRTC can
-    stop this reply straight away.
+    FastRTC queues audio faster than it plays, so without waiting:
+      - the status would switch to "Listening" while Aria is still talking, and
+      - the microphone would be switched back on while Aria's voice is still
+        coming out of the speakers (it would hear her as if she were the customer).
+    We wait in small 0.1 s steps (yielding None = "nothing to send").
     """
     started, seconds = None, 0.0
     for sample_rate, audio in audio_pieces:
@@ -73,7 +77,7 @@ def play_and_wait(audio_pieces):
         yield sample_rate, audio
     if started is None:
         return
-    while time.time() < started + seconds:
+    while time.time() < started + seconds + PLAYBACK_MARGIN:
         time.sleep(0.1)
         yield None
 
@@ -202,7 +206,10 @@ with gr.Blocks(title="Aria - Aura Skincare Support", css=ui.CSS,
 
     # The live call: ReplyOnPause calls respond() each time the customer pauses.
     voice.stream(
-        ReplyOnPause(respond, startup_fn=greet),
+        # can_interrupt=False: ignore the microphone while Aria is speaking. Without
+        # headphones the mic hears Aria's own voice from the speakers, and with
+        # interruptions on, that echo kept cutting her off (broken, garbled speech).
+        ReplyOnPause(respond, startup_fn=greet, can_interrupt=False),
         inputs=[voice],
         outputs=[voice],
         time_limit=600,         # a call can last up to 10 minutes
