@@ -155,18 +155,46 @@ def on_call_end(call_id):
            summarize_call(session))
 
 
+# A free public STUN server: helps browser and server find each other, but can't
+# relay audio through strict firewalls. Used only if TURN is not available.
+STUN_ONLY = {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
+
+
+def has_cloudflare_turn_keys() -> bool:
+    return bool(os.getenv("CLOUDFLARE_TURN_KEY_ID") and os.getenv("CLOUDFLARE_TURN_KEY_API_TOKEN"))
+
+
+async def browser_turn_credentials():
+    """
+    Fresh Cloudflare TURN credentials for each call (they are short-lived).
+    hf_token="" makes FastRTC use our Cloudflare keys directly, instead of its
+    HF_TOKEN relay service (turn.fastrtc.org), whose SSL certificate has expired.
+    """
+    try:
+        return await get_cloudflare_turn_credentials_async(hf_token="")
+    except Exception:
+        log.exception("Could not get TURN credentials, falling back to STUN only")
+        return STUN_ONLY
+
+
 def turn_server_config():
     """
-    On Hugging Face Spaces, the browser and server need a TURN relay server to connect.
-    We fetch fresh (short-lived) credentials for every call, using HF_TOKEN.
-    Locally this isn't needed, so it returns None.
+    On Hugging Face Spaces, the browser and the server sit on different networks, so
+    WebRTC needs a TURN relay server to connect them. Locally this isn't needed.
+    Returns (browser config, server config). Never crashes the app.
     """
-    if os.getenv("SPACE_ID") and os.getenv("HF_TOKEN"):
-        return (get_cloudflare_turn_credentials_async,
-                get_cloudflare_turn_credentials(ttl=360_000))
-    if os.getenv("SPACE_ID"):
-        log.warning("HF_TOKEN secret is missing: calls may fail to connect on Spaces.")
-    return None, None
+    if not os.getenv("SPACE_ID"):
+        return None, None  # running locally
+    if not has_cloudflare_turn_keys():
+        log.warning("Cloudflare TURN keys are missing: using STUN only, so some "
+                    "networks may fail to connect. See README > Deployment.")
+        return STUN_ONLY, None
+    try:
+        server = get_cloudflare_turn_credentials(hf_token="", ttl=86_400)
+    except Exception:
+        log.exception("Could not get server TURN credentials")
+        server = None
+    return browser_turn_credentials, server
 
 
 client_rtc, server_rtc = turn_server_config()

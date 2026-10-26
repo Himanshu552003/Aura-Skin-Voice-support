@@ -207,7 +207,7 @@ See [`.env.example`](.env.example).
 |---|---|
 | `GROQ_API_KEY` | Whisper STT and LLM |
 | `SARVAM_API_KEY` | Bulbul TTS |
-| `HF_TOKEN` | TURN server for WebRTC when deployed on Spaces |
+| `CLOUDFLARE_TURN_KEY_ID`, `CLOUDFLARE_TURN_KEY_API_TOKEN` | Cloudflare TURN relay for WebRTC when deployed on Spaces (not needed locally) |
 | `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `STT_MODEL`, `TTS_SPEAKER` | Optional overrides (defaults: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `whisper-large-v3-turbo`, `priya`) |
 
 ## Deployment (Hugging Face Spaces)
@@ -215,7 +215,7 @@ See [`.env.example`](.env.example).
 The repository is Space-ready: the YAML header at the top of this README configures the Space (Gradio 5.50.0, Python 3.11, `app.py`).
 
 1. Create a new Space (SDK: **Gradio**, hardware: free **CPU basic**).
-2. In **Settings → Variables and secrets**, add the secrets `GROQ_API_KEY`, `SARVAM_API_KEY` and `HF_TOKEN`.
+2. In **Settings → Variables and secrets**, add the secrets `GROQ_API_KEY`, `SARVAM_API_KEY`, `CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_KEY_API_TOKEN`.
 3. Push the code to the Space:
    ```bash
    git remote add space https://huggingface.co/spaces/<username>/<space-name>
@@ -223,7 +223,12 @@ The repository is Space-ready: the YAML header at the top of this README configu
    ```
 4. Wait for the build to finish (Logs tab), then open the App tab.
 
-**Why `HF_TOKEN`?** Browsers and the Space server sit behind different networks. WebRTC needs a TURN relay to connect them. On Spaces the app automatically requests fresh TURN credentials for every call from FastRTC's Cloudflare TURN service, authenticated with `HF_TOKEN`. Locally no TURN server is needed.
+**Why a TURN server?** Browsers and the Space server sit behind different networks, so WebRTC needs a TURN relay to connect them. On Spaces the app requests fresh, short-lived credentials for every call from **Cloudflare Realtime TURN** (free tier) using the two Cloudflare secrets. Locally no TURN server is needed.
+
+- **Why not FastRTC's `HF_TOKEN` relay?** FastRTC's HF_TOKEN-based relay (`turn.fastrtc.org`) currently serves an SSL certificate that expired on 2026-10-05. Calling it crashed the app at startup, so the app talks to Cloudflare directly. Certificate checks are never disabled.
+- **Failure handling:** if TURN credentials can't be fetched, the app logs a warning and falls back to a public STUN server instead of failing to start.
+
+**Getting the Cloudflare keys:** in the Cloudflare dashboard, open **Realtime → TURN Server** and create a TURN key. Copy its **Turn Token ID** to `CLOUDFLARE_TURN_KEY_ID` and its **API Token** to `CLOUDFLARE_TURN_KEY_API_TOKEN`.
 
 ---
 
